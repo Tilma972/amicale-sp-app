@@ -2,7 +2,7 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Banknote, Check, CreditCard, MessageSquare, Receipt, X, AlertCircle, Wifi, WifiOff } from 'lucide-react';
+import { AlertCircle, Banknote, Check, CreditCard, MessageSquare, Receipt, Wifi, WifiOff,X } from 'lucide-react';
 
 import { useApp } from '@/contexts/AppContext';
 import { supabase } from '@/lib/supabase';
@@ -433,7 +433,7 @@ export default function ExistingDonForm({
   };
 
   return (
-    <div className="bg-white rounded-xl shadow-lg max-h-full overflow-y-auto p-4">
+    <div className="bg-white rounded-xl shadow-lg h-[90%] max-h-[600px] overflow-y-auto p-2">
   {/* Header plus compact */}
   <div className="mb-6">
     <div className="flex items-center justify-between mb-2">
