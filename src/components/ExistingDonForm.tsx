@@ -1,8 +1,8 @@
 // src/components/ExistingDonForm.tsx - Composant optimisé PWA sapeurs-pompiers
 'use client';
 
-import { useCallback, useEffect,useMemo, useState } from 'react';
-import { Banknote, Check,CreditCard, MessageSquare, Receipt, X } from 'lucide-react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import { Banknote, Check, CreditCard, MessageSquare, Receipt, X, AlertCircle, Wifi, WifiOff } from 'lucide-react';
 
 import { useApp } from '@/contexts/AppContext';
 import { supabase } from '@/lib/supabase';
@@ -79,6 +79,8 @@ export default function ExistingDonForm({
   };
   const [submitInProgress, setSubmitInProgress] = useState(false);
   const [showQRCode, setShowQRCode] = useState(false);
+  const [submitError, setSubmitError] = useState<string | null>(null);
+  const [submitSuccess, setSubmitSuccess] = useState(false);
 
   const [newDon, setNewDon] = useState<NewTransactionData>({
     amount: 10,
@@ -129,27 +131,58 @@ export default function ExistingDonForm({
     }
   }, []);
 
+  // Fonction pour nettoyer les erreurs quand l'utilisateur interagit
+  const clearErrors = useCallback(() => {
+    if (submitError) {
+      setSubmitError(null);
+    }
+    if (submitSuccess) {
+      setSubmitSuccess(false);
+    }
+  }, [submitError, submitSuccess]);
+
   // Handler optimisé pour la sélection rapide du montant (SANS calcul automatique calendriers)
   const handleQuickAmountSelect = useCallback((amount: number) => {
+    clearErrors();
     triggerHapticFeedback();
     setNewDon(prev => ({
       ...prev,
       amount
       // Pas de calcul automatique des calendriers - on garde la valeur existante
     }));
-  }, [triggerHapticFeedback]);
+  }, [triggerHapticFeedback, clearErrors]);
 
   // Handler optimisé pour la sélection du mode de paiement
   const handlePaymentMethodSelect = useCallback((method: 'especes' | 'cheque' | 'carte') => {
+    clearErrors();
     triggerHapticFeedback();
     setNewDon(prev => ({ ...prev, payment_method: method }));
     setShowQRCode(method === 'carte');
-  }, [triggerHapticFeedback]);
+  }, [triggerHapticFeedback, clearErrors]);
 
   const handleSubmitDon = async (e: React.FormEvent) => {
     console.log('🔥 DÉBUT HANDLESUBMITDON');
     e.preventDefault();
-    if (!user || !profile?.team_id || !tourneeActive) return;
+    
+    // Réinitialiser les états d'erreur et de succès
+    setSubmitError(null);
+    setSubmitSuccess(false);
+    
+    // Validation des données requises
+    if (!user || !profile?.team_id || !tourneeActive) {
+      setSubmitError('Données utilisateur manquantes. Veuillez vous reconnecter.');
+      return;
+    }
+
+    if (!newDon.amount || newDon.amount <= 0) {
+      setSubmitError('Le montant du don doit être supérieur à 0€.');
+      return;
+    }
+
+    if (!newDon.calendars_given || newDon.calendars_given <= 0) {
+      setSubmitError('Le nombre de calendriers doit être supérieur à 0.');
+      return;
+    }
 
     setSubmitInProgress(true);
 
@@ -157,21 +190,25 @@ export default function ExistingDonForm({
       if (isOnline) {
         console.log('🔥 Mode online confirmé');
 
-        // Mode online : enregistrer directement
+        // Mode online : enregistrer directement avec tous les champs requis
+        const transactionData = {
+          user_id: user.id,
+          team_id: profile.team_id,
+          tournee_id: tourneeActive.tournee_id,
+          amount: newDon.amount,
+          calendars_given: newDon.calendars_given,
+          payment_method: newDon.payment_method,
+          donator_name: newDon.donator_name?.trim() || null,
+          donator_email: newDon.donator_email?.trim() || null,
+          notes: newDon.notes?.trim() || null,
+          status: 'pending'
+        };
+
+        console.log('🔥 Données à insérer:', transactionData);
+
         const { data, error } = await supabase
           .from('transactions')
-          .insert({
-            user_id: user.id,
-            team_id: profile.team_id,
-            tournee_id: tourneeActive.tournee_id,
-            amount: newDon.amount,
-            calendars_given: newDon.calendars_given,
-            payment_method: newDon.payment_method,
-            donator_name: newDon.donator_name || null,
-            donator_email: newDon.donator_email || null,
-            notes: newDon.notes || null,
-            status: 'pending'
-          })
+          .insert(transactionData)
           .select();
           
         console.log('🔥 Insertion terminée, error:', error);
@@ -179,6 +216,20 @@ export default function ExistingDonForm({
 
         if (error) {
           console.error('Erreur enregistrement don:', error);
+          let errorMessage = 'Erreur lors de l\'enregistrement du don.';
+          
+          // Messages d'erreur plus spécifiques selon le type d'erreur
+          if (error.code === '23505') {
+            errorMessage = 'Ce don a déjà été enregistré.';
+          } else if (error.code === '23503') {
+            errorMessage = 'Référence invalide. Veuillez vérifier vos données.';
+          } else if (error.message.includes('connection')) {
+            errorMessage = 'Erreur de connexion. Vérifiez votre réseau.';
+          } else if (error.message) {
+            errorMessage = `Erreur: ${error.message}`;
+          }
+          
+          setSubmitError(errorMessage);
           throw error;
         }
 
@@ -193,15 +244,18 @@ export default function ExistingDonForm({
         });
 
         console.log('🔥 Mise à jour optimiste terminée');
+        setSubmitSuccess(true);
 
-        // ✅ VÉRIFICATION DE LA CONDITION CRITIQUE
+        // ✅ VÉRIFICATION DE LA CONDITION CRITIQUE pour l'envoi d'email
         console.log('🔥 Vérification conditions pour fetch:');
         console.log('🔥   data:', !!data);
         console.log('🔥   data[0]:', !!data?.[0]);
         console.log('🔥   data[0].id:', data?.[0]?.id);
         console.log('🔥   newDon.donator_email:', newDon.donator_email);
 
-        if (data && data[0] && newDon.donator_email) {
+        let successMessage = 'Don enregistré avec succès !';
+
+        if (data && data[0] && newDon.donator_email?.trim()) {
           console.log('🚀 CONDITIONS OK - DÉBUT FETCH !');
           console.log('📧 Envoi reçu via nouvelle API...', {
             transactionId: data[0].id,
@@ -219,8 +273,8 @@ export default function ExistingDonForm({
               body: JSON.stringify({
                 transactionId: data[0].id,
                 donatorInfo: {
-                  email: newDon.donator_email,
-                  name: newDon.donator_name
+                  email: newDon.donator_email.trim(),
+                  name: newDon.donator_name?.trim() || null
                 },
                 sapeurInfo: {
                   name: profile?.full_name || 'Sapeur-Pompier'
@@ -232,27 +286,34 @@ export default function ExistingDonForm({
             });
 
             console.log('📧 Statut réponse API:', response.status);
-            const result = await response.json();
-            console.log('📧 Résultat API complet:', result);
+            
+            if (response.ok) {
+              const result = await response.json();
+              console.log('📧 Résultat API complet:', result);
 
-            if (result.success) {
-              console.log('✅ Reçu envoyé avec nouvelle API:', result.receiptNumber);
-              showSuccessToast(`Don enregistré ! Reçu envoyé à ${newDon.donator_email}`);
+              if (result.success) {
+                console.log('✅ Reçu envoyé avec nouvelle API:', result.receiptNumber);
+                successMessage = `Don enregistré ! Reçu envoyé à ${newDon.donator_email}`;
+              } else {
+                console.warn('⚠️ Erreur nouvelle API:', result.error);
+                successMessage = `Don enregistré ! (Erreur envoi email: ${result.error})`;
+              }
             } else {
-              console.warn('⚠️ Erreur nouvelle API:', result.error);
-              showSuccessToast('Don enregistré ! (Erreur envoi email: ' + result.error + ')');
+              console.warn('⚠️ Erreur HTTP:', response.status);
+              successMessage = 'Don enregistré ! (Erreur technique lors de l\'envoi du reçu)';
             }
           } catch (err) {
             console.error('❌ Erreur fetch:', err);
-            showSuccessToast('Don enregistré ! (Erreur technique)');
+            successMessage = 'Don enregistré ! (Erreur technique lors de l\'envoi du reçu)';
           }
         } else {
           console.log('❌ CONDITIONS FETCH NON REMPLIES:');
           console.log('❌   data:', !!data);
           console.log('❌   data[0]:', !!data?.[0]);
           console.log('❌   email:', newDon.donator_email);
-          showSuccessToast('Don enregistré avec succès !');
         }
+
+        showSuccessToast(successMessage);
 
         // ✅ Synchronisation en arrière-plan
         setTimeout(() => {
@@ -266,38 +327,67 @@ export default function ExistingDonForm({
 
     } catch (err) {
       console.log('💾 Erreur attrapée, mode offline...', err);
-      // Mode offline : sauvegarder localement
-      const offlineTransaction = {
-        id: `offline_${Date.now()}`,
-        user_id: user.id,
-        team_id: profile?.team_id ?? null,
-        tournee_id: tourneeActive.tournee_id ?? null,
-        amount: newDon.amount,
-        calendars_given: newDon.calendars_given,
-        payment_method: newDon.payment_method,
-        donator_name: newDon.donator_name || undefined,
-        donator_email: newDon.donator_email || undefined,
-        notes: newDon.notes || undefined,
-        status: 'pending',
-        created_at: new Date().toISOString(),
-        offline: true
-      };
-
-      addPendingTransaction(offlineTransaction);
       
-      // Mise à jour optimiste même en offline
-      updateTourneeOptimistic({
-        amount: newDon.amount,
-        calendars_given: newDon.calendars_given
-      });
+      // Si on n'a pas déjà défini une erreur spécifique, gérer l'erreur génériquement
+      if (!submitError) {
+        if (!isOnline) {
+          // Mode offline : sauvegarder localement
+          try {
+            const offlineTransaction = {
+              id: `offline_${Date.now()}`,
+              user_id: user.id,
+              team_id: profile?.team_id ?? null,
+              tournee_id: tourneeActive.tournee_id ?? null,
+              amount: newDon.amount,
+              calendars_given: newDon.calendars_given,
+              payment_method: newDon.payment_method,
+              donator_name: newDon.donator_name?.trim() || null,
+              donator_email: newDon.donator_email?.trim() || null,
+              notes: newDon.notes?.trim() || null,
+              status: 'pending',
+              created_at: new Date().toISOString(),
+              offline: true
+            };
 
-  showSuccessToast('Don sauvegardé hors-ligne ! Sera synchronisé au retour du réseau.');
+            addPendingTransaction(offlineTransaction);
+            
+            // Mise à jour optimiste même en offline
+            updateTourneeOptimistic({
+              amount: newDon.amount,
+              calendars_given: newDon.calendars_given
+            });
+
+            setSubmitSuccess(true);
+            showSuccessToast('Don sauvegardé hors-ligne ! Sera synchronisé au retour du réseau.');
+          } catch (offlineError) {
+            console.error('Erreur sauvegarde offline:', offlineError);
+            setSubmitError('Impossible de sauvegarder le don, même hors-ligne. Veuillez réessayer.');
+          }
+        } else {
+          // Erreur en ligne non gérée
+          setSubmitError('Erreur inattendue lors de l\'enregistrement. Veuillez réessayer.');
+        }
+      }
     }
 
-    // ✅ MAINTENANT seulement on ferme le formulaire
+    // ✅ Fermer le formulaire seulement si succès ou si c'est une erreur fatale
     console.log('🔥 Fermeture du formulaire...');
-    resetForm();
-    onSuccess();
+    
+    // Attendre un peu avant de fermer si c'est un succès pour que l'utilisateur voie le feedback
+    if (submitSuccess) {
+      setTimeout(() => {
+        resetForm();
+        onSuccess();
+      }, 1500);
+    } else if (submitError && !isOnline) {
+      // En cas d'erreur offline, on ferme quand même après un délai
+      setTimeout(() => {
+        resetForm();
+        onSuccess();
+      }, 2000);
+    }
+    // Si erreur online, on ne ferme pas le formulaire pour permettre à l'utilisateur de corriger
+    
     setSubmitInProgress(false);
   };
 
@@ -310,6 +400,9 @@ export default function ExistingDonForm({
       donator_email: '',
       notes: '',
     });
+    setSubmitError(null);
+    setSubmitSuccess(false);
+    setShowQRCode(false);
   };
 
   const showSuccessToast = (message: string) => {
@@ -345,12 +438,19 @@ export default function ExistingDonForm({
   <div className="mb-6">
     <div className="flex items-center justify-between mb-2">
       <h2 className="text-xl font-semibold text-gray-900">Nouveau don</h2>
-      {!isOnline && (
-        <div className="flex items-center gap-2 px-2 py-1 bg-amber-100 text-amber-800 rounded-full text-xs">
-          <div className="w-2 h-2 bg-amber-500 rounded-full"></div>
-          Hors ligne
-        </div>
-      )}
+      <div className="flex items-center gap-2">
+        {isOnline ? (
+          <div className="flex items-center gap-2 px-2 py-1 bg-green-100 text-green-800 rounded-full text-xs">
+            <Wifi className="w-3 h-3" />
+            En ligne
+          </div>
+        ) : (
+          <div className="flex items-center gap-2 px-2 py-1 bg-amber-100 text-amber-800 rounded-full text-xs">
+            <WifiOff className="w-3 h-3" />
+            Hors ligne
+          </div>
+        )}
+      </div>
     </div>
     <p className="text-gray-600 text-xs">
       Enregistrement d&apos;un don pour la campagne calendriers 2026
@@ -358,6 +458,31 @@ export default function ExistingDonForm({
   </div>
 
       <form onSubmit={handleSubmitDon} className="space-y-6">
+        
+        {/* Messages d'erreur et de succès */}
+        {submitError && (
+          <div className="bg-red-50 border border-red-200 rounded-lg p-4 mb-6">
+            <div className="flex items-start gap-3">
+              <AlertCircle className="w-5 h-5 text-red-500 flex-shrink-0 mt-0.5" />
+              <div>
+                <div className="font-medium text-red-800 text-sm">Erreur</div>
+                <div className="text-red-700 text-sm mt-1">{submitError}</div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {submitSuccess && (
+          <div className="bg-green-50 border border-green-200 rounded-lg p-4 mb-6">
+            <div className="flex items-start gap-3">
+              <Check className="w-5 h-5 text-green-500 flex-shrink-0 mt-0.5" />
+              <div>
+                <div className="font-medium text-green-800 text-sm">Succès</div>
+                <div className="text-green-700 text-sm mt-1">Don enregistré avec succès !</div>
+              </div>
+            </div>
+          </div>
+        )}
         
         {/* Section Montant - Design professionnel */}
         <div className="space-y-4">
@@ -402,10 +527,13 @@ export default function ExistingDonForm({
               type="number"
               step="1"
               value={newDon.amount}
-              onChange={(e) => setNewDon(prev => ({ 
-                ...prev, 
-                amount: parseFloat(e.target.value) || 0 
-              }))}
+              onChange={(e) => {
+                clearErrors();
+                setNewDon(prev => ({ 
+                  ...prev, 
+                  amount: parseFloat(e.target.value) || 0 
+                }));
+              }}
               className="w-full p-4 text-lg border-2 border-gray-200 rounded-xl focus:border-red-500 focus:outline-none transition-colors bg-white"
               placeholder="Montant personnalisé"
               required
@@ -429,7 +557,10 @@ export default function ExistingDonForm({
 
           <select
             value={newDon.calendars_given}
-            onChange={(e) => setNewDon(prev => ({ ...prev, calendars_given: parseInt(e.target.value) }))}
+            onChange={(e) => {
+              clearErrors();
+              setNewDon(prev => ({ ...prev, calendars_given: parseInt(e.target.value) }));
+            }}
             className="w-full p-4 text-lg border-2 border-gray-200 rounded-xl focus:border-red-500 focus:outline-none transition-colors bg-white"
             aria-label="Nombre de calendriers"
           >
@@ -547,10 +678,13 @@ export default function ExistingDonForm({
               <input
                 type="email"
                 value={newDon.donator_email}
-                onChange={(e) => setNewDon(prev => ({ 
-                  ...prev, 
-                  donator_email: e.target.value 
-                }))}
+                onChange={(e) => {
+                  clearErrors();
+                  setNewDon(prev => ({ 
+                    ...prev, 
+                    donator_email: e.target.value 
+                  }));
+                }}
                 className="w-full p-3 border-2 border-gray-200 rounded-lg focus:border-red-500 focus:outline-none transition-colors"
                 placeholder="email@exemple.com"
               />
@@ -561,10 +695,13 @@ export default function ExistingDonForm({
               <input
                 type="text"
                 value={newDon.donator_name}
-                onChange={(e) => setNewDon(prev => ({ 
-                  ...prev, 
-                  donator_name: e.target.value 
-                }))}
+                onChange={(e) => {
+                  clearErrors();
+                  setNewDon(prev => ({ 
+                    ...prev, 
+                    donator_name: e.target.value 
+                  }));
+                }}
                 className="w-full p-3 border-2 border-gray-200 rounded-lg focus:border-red-500 focus:outline-none transition-colors"
                 placeholder="Prénom Nom"
               />
@@ -584,7 +721,10 @@ export default function ExistingDonForm({
 
           <textarea
             value={newDon.notes}
-            onChange={(e) => setNewDon(prev => ({ ...prev, notes: e.target.value }))}
+            onChange={(e) => {
+              clearErrors();
+              setNewDon(prev => ({ ...prev, notes: e.target.value }));
+            }}
             className="w-full p-3 border-2 border-gray-200 rounded-lg focus:border-red-500 focus:outline-none transition-colors resize-none"
             rows={3}
             placeholder="Informations complémentaires..."
@@ -619,16 +759,29 @@ export default function ExistingDonForm({
             
             <button
               type="submit"
-              disabled={submitInProgress}
-              className="flex-1 px-6 py-3 bg-red-600 text-white font-medium rounded-lg hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center justify-center gap-2"
+              disabled={submitInProgress || submitSuccess}
+              className={`flex-1 px-6 py-3 font-medium rounded-lg transition-colors flex items-center justify-center gap-2 ${
+                submitSuccess 
+                  ? 'bg-green-600 text-white cursor-default'
+                  : submitError
+                    ? 'bg-red-600 text-white hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed'
+                    : 'bg-red-600 text-white hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed'
+              }`}
             >
               {submitInProgress && (
                 <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
               )}
+              {submitSuccess && !submitInProgress && (
+                <Check className="w-4 h-4" />
+              )}
               <span>
                 {submitInProgress 
-                  ? 'Enregistrement...' 
-                  : `Enregistrer le don de ${newDon.amount}€`
+                  ? (isOnline ? 'Enregistrement...' : 'Sauvegarde...')
+                  : submitSuccess
+                    ? 'Don enregistré !'
+                    : submitError
+                      ? 'Réessayer'
+                      : `Enregistrer le don de ${newDon.amount}€`
                 }
               </span>
             </button>
